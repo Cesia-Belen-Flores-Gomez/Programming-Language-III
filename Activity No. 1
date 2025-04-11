@@ -1,0 +1,54 @@
+# Paso 1: Crear los datos 
+sexo <- c(
+  rep("Femenino", 13),
+  rep("Masculino", 13)
+)
+
+edad <- c(
+  # Femenino
+  19, 22, 21, 25, 20, 24, 23, 26, 18, 27, 28, 22, 20,
+  # Masculino
+  19, 21, 23, 20, 25, 26, 22, 24, 18, 28, 27, 21, 19
+)
+
+datos <- data.frame(Sexo = sexo, Edad = edad)
+
+# Paso 2: Resumen estadístico
+library(dplyr)
+
+resumen <- datos %>%
+  group_by(Sexo) %>%
+  summarise(
+    Media = mean(Edad),
+    Desviación = sd(Edad),
+    N = n()
+  )
+
+print(resumen)
+
+# Paso 3: Prueba t de Student
+t_test_result <- t.test(Edad ~ Sexo, data = datos, var.equal = TRUE)
+print(t_test_result)
+
+# Paso 4: Gráficos
+# Histograma
+hist(datos$Edad,
+     main = "Distribución de Edades de Fumadores",
+     xlab = "Edad",
+     col = "lightblue",
+     border = "white")
+
+# Boxplot por sexo
+boxplot(Edad ~ Sexo, data = datos,
+        col = c("pink", "lightgreen"),
+        main = "Boxplot de Edades por Sexo",
+        ylab = "Edad")
+
+# Gráfico de violín con ggplot2
+library(ggplot2)
+
+ggplot(datos, aes(x = Sexo, y = Edad, fill = Sexo)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white") +
+  labs(title = "Distribución de Edad por Sexo", y = "Edad") +
+  theme_minimal()
