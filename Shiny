@@ -1,0 +1,93 @@
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readxl)
+
+ui <- fluidPage(
+  titlePanel("ANOVA con Tukey"),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("datafile", "Sube tu archivo (.csv o .xlsx)", accept=c(".csv", ".xlsx")),
+      actionButton("analizar", "Analizar"),
+      helpText("Cada columna es un grupo. Se aplica ANOVA si hay ≥3 grupos.")
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Resultados", verbatimTextOutput("resultado")),
+        tabPanel("Tukey", verbatimTextOutput("tukey")),
+        tabPanel("Tukey Plot", plotOutput("tukeyplot")),
+        tabPanel("Cajas", plotOutput("grafico"))
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  datos <- reactive({
+    req(input$datafile)
+    ext <- tools::file_ext(input$datafile$name)
+    df <- switch(ext,
+                 "csv" = read.csv(input$datafile$datapath, sep=";", dec=".", stringsAsFactors = FALSE),
+                 "xlsx" = read_excel(input$datafile$datapath),
+                 validate("Formato de archivo no soportado."))
+    
+    df <- df[, colSums(is.na(df)) < nrow(df)]
+    
+    df_long <- pivot_longer(df, cols=everything(), names_to="grupo", values_to="valor") %>%
+      mutate(valor = as.numeric(valor)) %>%
+      filter(!is.na(valor)) %>%
+      mutate(grupo = as.factor(grupo))
+    
+    return(df_long)
+  })
+  
+  analisis <- eventReactive(input$analizar, {
+    df <- datos()
+    n_groups <- n_distinct(df$grupo)
+    
+    if(n_groups >= 3){
+      modelo <- aov(valor ~ grupo, data=df)
+      tukey <- TukeyHSD(modelo)
+      list(tipo="ANOVA", modelo=modelo, resumen=summary(modelo), tukey=tukey)
+    } else {
+      list(tipo="Error", resumen="Se requieren al menos 3 grupos para ANOVA.", tukey=NULL)
+    }
+  })
+  
+  output$resultado <- renderPrint({
+    req(analisis())
+    cat("Resultado del análisis:", analisis()$tipo, "\n\n")
+    print(analisis()$resumen)
+  })
+  
+  output$tukey <- renderPrint({
+    res <- analisis()
+    if (res$tipo == "ANOVA" && !is.null(res$tukey)) {
+      cat("Prueba de Tukey:\n\n")
+      print(res$tukey)
+    } else {
+      cat("Tukey no se aplica.\n")
+    }
+  })
+  
+  output$tukeyplot <- renderPlot({
+    res <- analisis()
+    if (!is.null(res$tukey)) {
+      plot(res$tukey, las=1, col="blue")
+    } else {
+      plot.new()
+      title("Gráfico de Tukey no disponible")
+    }
+  })
+  
+  output$grafico <- renderPlot({
+    ggplot(datos(), aes(x=grupo, y=valor)) +
+      geom_boxplot(fill="lightblue") +
+      theme_minimal() +
+      labs(title="Gráfico de Cajas", x="Grupo", y="Valor")
+  })
+}
+
+shinyApp(ui, server)
