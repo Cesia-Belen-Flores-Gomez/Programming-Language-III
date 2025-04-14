@@ -1,0 +1,424 @@
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(broom)
+library(DT)  # Para tablas interactivas
+library(shinydashboard)  # Para una interfaz más profesional
+library(plotly)  # Para gráficos interactivos
+
+ui <- dashboardPage(
+  dashboardHeader(title = "Análisis ANOVA Avanzado"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Inicio", tabName = "inicio", icon = icon("house")),
+      menuItem("Resultados", tabName = "resultados", icon = icon("chart-simple")),
+      menuItem("Visualización", tabName = "visualizacion", icon = icon("chart-bar")),
+      menuItem("Reporte", tabName = "reporte", icon = icon("file-lines"))
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      # Pestaña de inicio
+      tabItem(tabName = "inicio",
+              fluidRow(
+                box(
+                  title = "Cargar Datos", status = "primary", solidHeader = TRUE, width = 12,
+                  fileInput("datafile", "Sube tu archivo (.csv o .xlsx)", accept = c(".csv", ".xlsx")),
+                  fluidRow(
+                    column(6, 
+                           radioButtons("delim", "Delimitador (para CSV):",
+                                        choices = c(Coma = ",", Punto_y_coma = ";", Tabulador = "\t"),
+                                        selected = ";")
+                    ),
+                    column(6,
+                           radioButtons("decimal", "Símbolo decimal:",
+                                        choices = c(Punto = ".", Coma = ","),
+                                        selected = ".")
+                    )
+                  ),
+                  actionButton("analizar", "Realizar análisis ANOVA", icon = icon("calculator"), 
+                               class = "btn-primary btn-lg")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Vista previa de datos", status = "info", solidHeader = TRUE, width = 12,
+                  DTOutput("preview_data")
+                )
+              )
+      ),
+      
+      # Pestaña de resultados
+      tabItem(tabName = "resultados",
+              fluidRow(
+                box(
+                  title = "Resultados del ANOVA", status = "success", solidHeader = TRUE, width = 6,
+                  verbatimTextOutput("resultado")
+                ),
+                box(
+                  title = "Prueba de Tukey", status = "success", solidHeader = TRUE, width = 6,
+                  verbatimTextOutput("tukey")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Tabla de resultados", status = "warning", solidHeader = TRUE, width = 12,
+                  DTOutput("anova_table")
+                )
+              )
+      ),
+      
+      # Pestaña de visualización
+      tabItem(tabName = "visualizacion",
+              fluidRow(
+                box(
+                  title = "Comparaciones de Tukey", status = "success", solidHeader = TRUE, width = 6,
+                  plotOutput("tukeyplot")
+                ),
+                box(
+                  title = "Diagrama de cajas", status = "success", solidHeader = TRUE, width = 6,
+                  plotlyOutput("boxplot_interactive")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Diagnósticos del modelo", status = "warning", solidHeader = TRUE, width = 12,
+                  plotOutput("diagnosticos")
+                )
+              )
+      ),
+      
+      # Pestaña de reporte
+      tabItem(tabName = "reporte",
+              fluidRow(
+                box(
+                  title = "Reporte completo del ANOVA", status = "primary", solidHeader = TRUE, width = 12,
+                  verbatimTextOutput("reporte_completo"),
+                  hr(),
+                  downloadButton("download_report", "Descargar reporte completo")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Interpretación de resultados", status = "info", solidHeader = TRUE, width = 12,
+                  htmlOutput("interpretacion")
+                )
+              )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # Cargar y procesar datos
+  datos_raw <- reactive({
+    req(input$datafile)
+    ext <- tools::file_ext(input$datafile$name)
+    
+    if(ext == "csv") {
+      df <- read.csv(
+        input$datafile$datapath, 
+        sep = input$delim, 
+        dec = input$decimal,
+        stringsAsFactors = FALSE
+      )
+    } else if(ext == "xlsx") {
+      df <- read_excel(input$datafile$datapath)
+    } else {
+      validate("Formato de archivo no soportado.")
+    }
+    
+    # Eliminar columnas con solo NA
+    df <- df[, colSums(is.na(df)) < nrow(df)]
+    return(df)
+  })
+  
+  # Datos en formato largo para análisis  
+  datos <- reactive({
+    df <- datos_raw()
+    
+    df_long <- pivot_longer(df, cols = everything(), names_to = "grupo", values_to = "valor") %>%
+      mutate(valor = as.numeric(valor)) %>%
+      filter(!is.na(valor)) %>%
+      mutate(grupo = as.factor(grupo))
+    
+    return(df_long)
+  })
+  
+  # Vista previa de datos
+  output$preview_data <- renderDT({
+    req(datos_raw())
+    datatable(datos_raw(), options = list(pageLength = 5, scrollX = TRUE))
+  })
+  
+  # Análisis ANOVA
+  analisis <- eventReactive(input$analizar, {
+    df <- datos()
+    n_groups <- n_distinct(df$grupo)
+    
+    if(n_groups >= 3) {
+      # Modelo ANOVA
+      modelo <- aov(valor ~ grupo, data = df)
+      
+      # Resultados del modelo
+      modelo_summary <- summary(modelo)
+      tukey <- TukeyHSD(modelo)
+      
+      # Crear reportes tidy
+      modelo_tidy <- tidy(modelo)
+      modelo_glance <- glance(modelo)
+      
+      # Diagnósticos del modelo
+      diagnosticos <- list(
+        residuos = resid(modelo),
+        valores_ajustados = fitted(modelo),
+        qq = qqnorm(resid(modelo), plot = FALSE)
+      )
+      
+      # Estadísticas de grupos
+      estadisticas_grupo <- df %>%
+        group_by(grupo) %>%
+        summarise(
+          n = n(),
+          media = mean(valor, na.rm = TRUE),
+          desv_est = sd(valor, na.rm = TRUE),
+          min = min(valor, na.rm = TRUE),
+          max = max(valor, na.rm = TRUE)
+        )
+      
+      list(
+        tipo = "ANOVA", 
+        modelo = modelo, 
+        resumen = modelo_summary, 
+        tukey = tukey,
+        reporte_tidy = modelo_tidy,
+        reporte_glance = modelo_glance,
+        diagnosticos = diagnosticos,
+        estadisticas = estadisticas_grupo
+      )
+    } else {
+      showNotification("Se requieren al menos 3 grupos para realizar ANOVA.", type = "error")
+      list(tipo = "Error", resumen = "Se requieren al menos 3 grupos para ANOVA.")
+    }
+  })
+  
+  # Outputs para resultados
+  output$resultado <- renderPrint({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      cat("Análisis de varianza (ANOVA)\n\n")
+      print(analisis()$resumen)
+    } else {
+      cat(analisis()$resumen)
+    }
+  })
+  
+  output$tukey <- renderPrint({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      cat("Prueba de Tukey HSD\n\n")
+      print(analisis()$tukey)
+    } else {
+      cat("No se pudo realizar la prueba de Tukey.")
+    }
+  })
+  
+  # Tabla de resultados
+  output$anova_table <- renderDT({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      df_result <- analisis()$reporte_tidy %>%
+        mutate(
+          p.value = round(p.value, 5),
+          significativo = ifelse(p.value < 0.05, "Sí", "No")
+        )
+      datatable(df_result, options = list(pageLength = 10)) %>%
+        formatStyle(
+          'significativo',
+          backgroundColor = styleEqual(c("Sí", "No"), c('rgba(0, 255, 0, 0.2)', 'rgba(255, 0, 0, 0.2)'))
+        )
+    }
+  })
+  
+  # Gráficos
+  output$tukeyplot <- renderPlot({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      par(mar = c(5, 8, 4, 2))
+      plot(analisis()$tukey, las = 1, col = "blue")
+    } else {
+      plot.new()
+      title("Gráfico de Tukey no disponible")
+    }
+  })
+  
+  output$boxplot_interactive <- renderPlotly({
+    req(datos())
+    p <- ggplot(datos(), aes(x = grupo, y = valor, fill = grupo)) +
+      geom_boxplot(alpha = 0.7) +
+      geom_jitter(width = 0.2, alpha = 0.5) +
+      theme_minimal() +
+      labs(title = "Distribución por grupos", x = "Grupo", y = "Valor") +
+      theme(legend.position = "none")
+    
+    ggplotly(p)
+  })
+  
+  output$diagnosticos <- renderPlot({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      par(mfrow = c(2, 2))
+      plot(analisis()$modelo)
+    } else {
+      plot.new()
+      title("Diagnósticos no disponibles")
+    }
+  })
+  
+  # Reporte completo
+  output$reporte_completo <- renderPrint({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      cat("===== REPORTE COMPLETO DEL ANÁLISIS ANOVA =====\n\n")
+      
+      cat("RESUMEN DEL MODELO\n")
+      cat("-------------------\n")
+      print(analisis()$resumen)
+      
+      cat("\n\nESTADÍSTICAS DEL MODELO\n")
+      cat("----------------------\n")
+      print(analisis()$reporte_glance)
+      
+      cat("\n\nESTADÍSTICAS POR GRUPO\n")
+      cat("---------------------\n")
+      print(analisis()$estadisticas)
+      
+      cat("\n\nPRUEBA DE TUKEY HSD\n")
+      cat("-----------------\n")
+      print(analisis()$tukey)
+    } else {
+      cat("El reporte no está disponible porque no se pudo realizar el análisis ANOVA.")
+    }
+  })
+  
+  # Interpretación de resultados
+  output$interpretacion <- renderUI({
+    req(analisis())
+    if(analisis()$tipo == "ANOVA") {
+      modelo_tidy <- analisis()$reporte_tidy
+      resultado_f <- modelo_tidy %>% filter(term == "grupo")
+      
+      if(resultado_f$p.value < 0.05) {
+        color_result <- "green"
+        interpretacion_principal <- "Se encontraron diferencias significativas entre los grupos."
+      } else {
+        color_result <- "red"
+        interpretacion_principal <- "No se encontraron diferencias significativas entre los grupos."
+      }
+      
+      # Interpretaciones de Tukey
+      tukey_df <- as.data.frame(analisis()$tukey$grupo)
+      tukey_df$comparacion <- rownames(tukey_df)
+      
+      diferencias_significativas <- tukey_df %>%
+        filter(`p adj` < 0.05) %>%
+        arrange(`p adj`)
+      
+      HTML(paste0(
+        "<h4 style='color:", color_result, "'>", interpretacion_principal, "</h4>",
+        "<p><strong>Valor F:</strong> ", round(resultado_f$statistic, 2), 
+        ", <strong>p-valor:</strong> ", round(resultado_f$p.value, 5), "</p>",
+        
+        if(nrow(diferencias_significativas) > 0) {
+          paste0(
+            "<h4>Diferencias significativas entre grupos:</h4>",
+            "<ul>",
+            paste0(
+              "<li>", diferencias_significativas$comparacion, 
+              " (p-adj = ", round(diferencias_significativas$`p adj`, 5), ")</li>", 
+              collapse = ""
+            ),
+            "</ul>"
+          )
+        } else if(resultado_f$p.value < 0.05) {
+          "<p>La prueba ANOVA indica diferencias significativas, pero la prueba post-hoc de Tukey no detecta qué grupos específicos son diferentes.</p>"
+        } else {
+          "<p>No es necesario interpretar las comparaciones por pares, ya que no hay efecto significativo general.</p>"
+        }
+      ))
+    } else {
+      return(HTML("<p>No hay interpretación disponible.</p>"))
+    }
+  })
+  
+  # Descarga de reporte
+  output$download_report <- downloadHandler(
+    filename = function() {
+      paste("reporte-anova-", Sys.Date(), ".txt", sep = "")
+    },
+    content = function(file) {
+      if(analisis()$tipo == "ANOVA") {
+        sink(file)
+        cat("===== REPORTE COMPLETO DEL ANÁLISIS ANOVA =====\n\n")
+        cat("Fecha: ", Sys.Date(), "\n\n")
+        
+        cat("RESUMEN DEL MODELO\n")
+        cat("-------------------\n")
+        print(analisis()$resumen)
+        
+        cat("\n\nESTADÍSTICAS POR GRUPO\n")
+        cat("---------------------\n")
+        print(analisis()$estadisticas)
+        
+        cat("\n\nPRUEBA DE TUKEY HSD\n")
+        cat("-----------------\n")
+        print(analisis()$tukey)
+        
+        # Interpretación
+        cat("\n\nINTERPRETACIÓN\n")
+        cat("-------------\n")
+        modelo_tidy <- analisis()$reporte_tidy
+        resultado_f <- modelo_tidy %>% filter(term == "grupo")
+        
+        if(resultado_f$p.value < 0.05) {
+          cat("Se encontraron diferencias significativas entre los grupos.\n")
+        } else {
+          cat("No se encontraron diferencias significativas entre los grupos.\n")
+        }
+        
+        cat("Valor F: ", round(resultado_f$statistic, 2), 
+            ", p-valor: ", round(resultado_f$p.value, 5), "\n\n")
+        
+        # Diferencias específicas
+        tukey_df <- as.data.frame(analisis()$tukey$grupo)
+        tukey_df$comparacion <- rownames(tukey_df)
+        
+        diferencias_significativas <- tukey_df %>%
+          filter(`p adj` < 0.05) %>%
+          arrange(`p adj`)
+        
+        if(nrow(diferencias_significativas) > 0) {
+          cat("Diferencias significativas entre grupos:\n")
+          for(i in 1:nrow(diferencias_significativas)) {
+            cat("- ", diferencias_significativas$comparacion[i], 
+                " (p-adj = ", round(diferencias_significativas$`p adj`[i], 5), ")\n")
+          }
+        } else if(resultado_f$p.value < 0.05) {
+          cat("La prueba ANOVA indica diferencias significativas, pero la prueba post-hoc de Tukey no detecta qué grupos específicos son diferentes.\n")
+        } else {
+          cat("No es necesario interpretar las comparaciones por pares, ya que no hay efecto significativo general.\n")
+        }
+        
+        sink()
+      } else {
+        # En caso de error
+        writeLines("No se pudo generar el reporte porque no se realizó el análisis ANOVA correctamente.", file)
+      }
+    }
+  )
+}
+
+shinyApp(ui, server)
