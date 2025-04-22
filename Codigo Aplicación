@@ -1,0 +1,559 @@
+library(shiny)
+library(readr)
+library(readxl)
+library(tseries)
+library(nortest)
+library(dplyr)
+library(ggplot2)
+
+ui <- fluidPage(
+  titlePanel("Análisis de Datos Cualitativos, Cuantitativos y Pruebas de Normalidad"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file", "Cargar archivo (.csv o .xlsx)", 
+                accept = c(".csv", ".xlsx")),
+      
+      # Añadido selector de separador para archivos CSV
+      conditionalPanel(
+        condition = "tools.file_ext(input.file ? input.file.name : '') == 'csv'",
+        selectInput("sep", "Separador:", 
+                    choices = c("Coma" = ",", "Punto y coma" = ";", "Tabulador" = "\t"))
+      ),
+      
+      # Añadido selector para encoding
+      conditionalPanel(
+        condition = "tools.file_ext(input.file ? input.file.name : '') == 'csv'",
+        selectInput("encoding", "Codificación:", 
+                    choices = c("UTF-8", "Latin-1", "Windows-1252"))
+      ),
+      
+      # Selector de pruebas agrupadas por categoría
+      selectInput("test", "Seleccione la prueba:", 
+                  choices = list(
+                    `Pruebas para datos categóricos` = c(
+                      "Chi-cuadrado" = "chi2",
+                      "McNemar" = "mcnemar"
+                      # "Cochran's Q" = "cochran" - Removido
+                    ),
+                    `Pruebas paramétricas` = c(
+                      "T de Student" = "t",
+                      "ANOVA" = "anova",
+                      "Correlación Pearson" = "pearson",
+                      "Cociente de varianzas (F)" = "varratio"
+                    ),
+                    `Pruebas no paramétricas` = c(
+                      "Wilcoxon" = "wilcox",
+                      "Correlación Spearman" = "spearman"
+                    ),
+                    `Pruebas de normalidad` = c(
+                      "Shapiro-Wilk" = "shapiro",
+                      "Kolmogorov-Smirnov" = "ks",
+                      "Lilliefors" = "lillie",
+                      "Jarque-Bera" = "jb"
+                    )
+                  )),
+      
+      # Panel dinámico para inputs específicos de cada prueba
+      uiOutput("inputs"),
+      
+      # Añadido botón para ejecutar análisis
+      actionButton("run", "Ejecutar análisis", 
+                   class = "btn-primary", 
+                   style = "margin-top: 15px")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Resultados", 
+                 h4("Datos cargados:"),
+                 tableOutput("data_preview"),
+                 hr(),
+                 h4("Resultados del análisis:"),
+                 verbatimTextOutput("result"),
+                 downloadButton("download_result", "Descargar resultados")),
+        tabPanel("Gráficos", 
+                 plotOutput("plot1", height = "400px"),
+                 plotOutput("plot2", height = "400px"))
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # Lectura reactiva del dataset
+  dataset <- reactive({
+    req(input$file)
+    ext <- tools::file_ext(input$file$name)
+    
+    if (ext == "csv") {
+      tryCatch({
+        read_csv(input$file$datapath, 
+                 col_names = TRUE, 
+                 na = c("", "NA", "N/A"),
+                 locale = locale(encoding = input$encoding),
+                 show_col_types = FALSE,
+                 delim = input$sep)
+      }, error = function(e) {
+        showNotification(paste("Error al leer el archivo:", e$message), 
+                         type = "error", duration = 10)
+        return(NULL)
+      })
+    } else if (ext == "xlsx") {
+      tryCatch({
+        read_excel(input$file$datapath)
+      }, error = function(e) {
+        showNotification(paste("Error al leer el archivo Excel:", e$message), 
+                         type = "error", duration = 10)
+        return(NULL)
+      })
+    } else {
+      showNotification("Formato de archivo no soportado. Use CSV o XLSX", 
+                       type = "error", duration = 10)
+      return(NULL)
+    }
+  })
+  
+  # Vista previa de los datos
+  output$data_preview <- renderTable({
+    req(dataset())
+    head(dataset(), 10)
+  })
+  
+  # Renderizado dinámico de los controles según la prueba seleccionada
+  output$inputs <- renderUI({
+    req(dataset())
+    df <- dataset()
+    
+    # Identificación mejorada de tipos de variables
+    cat_vars <- names(df)[sapply(df, function(x) {
+      is.character(x) || is.factor(x) || length(unique(x)) <= 10
+    })]
+    
+    num_vars <- names(df)[sapply(df, function(x) {
+      is.numeric(x) && !is.factor(x) && length(unique(x)) > 10
+    })]
+    
+    # Manejo si no hay variables del tipo adecuado
+    if (input$test %in% c("chi2", "mcnemar") && length(cat_vars) < 2) {
+      return(tags$div(class = "alert alert-warning", 
+                      "No hay suficientes variables categóricas en el dataset"))
+    }
+    
+    if (input$test %in% c("t", "anova", "wilcox") && 
+        (length(cat_vars) < 1 || length(num_vars) < 1)) {
+      return(tags$div(class = "alert alert-warning", 
+                      "Se necesita al menos una variable categórica y una numérica"))
+    }
+    
+    if (input$test %in% c("pearson", "spearman", "varratio") && length(num_vars) < 2) {
+      return(tags$div(class = "alert alert-warning", 
+                      "Se necesitan al menos dos variables numéricas"))
+    }
+    
+    if (input$test %in% c("shapiro", "ks", "lillie", "jb") && length(num_vars) < 1) {
+      return(tags$div(class = "alert alert-warning", 
+                      "No hay variables numéricas en el dataset"))
+    }
+    
+    # Controles específicos para cada prueba
+    switch(input$test,
+           "chi2" = tagList(
+             selectInput("var1", "Variable categórica 1", choices = cat_vars),
+             selectInput("var2", "Variable categórica 2", choices = cat_vars)
+           ),
+           "mcnemar" = tagList(
+             selectInput("var1", "Variable categórica 1", choices = cat_vars),
+             selectInput("var2", "Variable categórica 2", choices = cat_vars),
+             helpText("Nota: Ambas variables deben ser dicotómicas")
+           ),
+           "t" = tagList(
+             selectInput("group", "Variable de agrupación (2 niveles)", choices = cat_vars),
+             selectInput("value", "Variable numérica", choices = num_vars),
+             checkboxInput("paired", "Muestras pareadas", value = FALSE),
+             checkboxInput("var_equal", "Varianzas iguales", value = FALSE)
+           ),
+           "anova" = tagList(
+             selectInput("group", "Factor (>=3 niveles)", choices = cat_vars),
+             selectInput("value", "Variable respuesta", choices = num_vars)
+           ),
+           "wilcox" = tagList(
+             selectInput("group", "Variable de agrupación", choices = cat_vars),
+             selectInput("value", "Variable numérica", choices = num_vars),
+             checkboxInput("paired", "Muestras pareadas", value = FALSE)
+           ),
+           "pearson" = tagList(
+             selectInput("xvar", "Variable X", choices = num_vars),
+             selectInput("yvar", "Variable Y", choices = num_vars)
+           ),
+           "spearman" = tagList(
+             selectInput("xvar", "Variable X", choices = num_vars),
+             selectInput("yvar", "Variable Y", choices = num_vars)
+           ),
+           "varratio" = tagList(
+             selectInput("xvar", "Variable 1", choices = num_vars),
+             selectInput("yvar", "Variable 2", choices = num_vars)
+           ),
+           "shapiro" = tagList(
+             selectInput("numvar", "Variable numérica", choices = num_vars),
+             helpText("Recomendado para muestras pequeñas (n < 50)")
+           ),
+           "ks" = tagList(
+             selectInput("numvar", "Variable numérica", choices = num_vars),
+             helpText("Recomendado para muestras grandes (n > 50)")
+           ),
+           "lillie" = tagList(
+             selectInput("numvar", "Variable numérica", choices = num_vars),
+             helpText("Adaptación de Kolmogorov-Smirnov cuando los parámetros se estiman desde los datos")
+           ),
+           "jb" = tagList(
+             selectInput("numvar", "Variable numérica", choices = num_vars),
+             helpText("Basado en asimetría y curtosis")
+           )
+    )
+  })
+  
+  # Ejecutar análisis cuando se presiona el botón
+  results <- eventReactive(input$run, {
+    req(dataset())
+    df <- dataset()
+    test <- input$test
+    
+    # Guardar información sobre la prueba para el reporte
+    test_name <- switch(test,
+                        "chi2" = "Chi-cuadrado",
+                        "mcnemar" = "McNemar",
+                        "t" = "T de Student",
+                        "anova" = "ANOVA",
+                        "wilcox" = "Wilcoxon",
+                        "pearson" = "Correlación de Pearson",
+                        "spearman" = "Correlación de Spearman",
+                        "varratio" = "Cociente de varianzas (F)",
+                        "shapiro" = "Shapiro-Wilk",
+                        "ks" = "Kolmogorov-Smirnov",
+                        "lillie" = "Lilliefors",
+                        "jb" = "Jarque-Bera")
+    
+    # Variables usadas para el análisis
+    vars_used <- switch(test,
+                        "chi2" = c(input$var1, input$var2),
+                        "mcnemar" = c(input$var1, input$var2),
+                        "t" = c(input$group, input$value),
+                        "anova" = c(input$group, input$value),
+                        "wilcox" = c(input$group, input$value),
+                        "pearson" = c(input$xvar, input$yvar),
+                        "spearman" = c(input$xvar, input$yvar),
+                        "varratio" = c(input$xvar, input$yvar),
+                        "shapiro" = input$numvar,
+                        "ks" = input$numvar,
+                        "lillie" = input$numvar,
+                        "jb" = input$numvar)
+    
+    # Ejecutar el análisis con manejo de errores
+    tryCatch({
+      result <- switch(test,
+                       "chi2" = {
+                         tbl <- table(df[[input$var1]], df[[input$var2]])
+                         list(
+                           analysis = chisq.test(tbl), 
+                           contingency_table = tbl
+                         )
+                       },
+                       "mcnemar" = {
+                         tbl <- table(df[[input$var1]], df[[input$var2]])
+                         if (nrow(tbl) != 2 || ncol(tbl) != 2) {
+                           stop("El test de McNemar requiere variables dicotómicas (2x2)")
+                         }
+                         list(
+                           analysis = mcnemar.test(tbl),
+                           contingency_table = tbl
+                         )
+                       },
+                       "t" = {
+                         # Verificar que el grupo tenga exactamente 2 niveles
+                         levels_count <- length(unique(na.omit(df[[input$group]])))
+                         if (levels_count != 2) {
+                           stop(paste("La variable de agrupación debe tener exactamente 2 niveles, pero tiene", levels_count))
+                         }
+                         
+                         # Ejecutar t-test con parámetros apropiados
+                         list(analysis = t.test(df[[input$value]] ~ df[[input$group]], 
+                                                paired = input$paired, 
+                                                var.equal = input$var_equal))
+                       },
+                       "anova" = {
+                         # Verificar que el grupo tenga al menos 3 niveles
+                         levels_count <- length(unique(na.omit(df[[input$group]])))
+                         if (levels_count < 3) {
+                           stop(paste("El factor debe tener al menos 3 niveles, pero tiene", levels_count))
+                         }
+                         
+                         model <- aov(df[[input$value]] ~ df[[input$group]])
+                         list(
+                           analysis = summary(model),
+                           tukey = TukeyHSD(model)  # Añadido análisis post-hoc
+                         )
+                       },
+                       "wilcox" = list(
+                         analysis = wilcox.test(df[[input$value]] ~ df[[input$group]], 
+                                                paired = input$paired)
+                       ),
+                       "pearson" = list(
+                         analysis = cor.test(df[[input$xvar]], df[[input$yvar]], 
+                                             method = "pearson")
+                       ),
+                       "spearman" = list(
+                         analysis = cor.test(df[[input$xvar]], df[[input$yvar]], 
+                                             method = "spearman")
+                       ),
+                       "varratio" = list(
+                         analysis = var.test(df[[input$xvar]], df[[input$yvar]])
+                       ),
+                       "shapiro" = {
+                         x <- na.omit(df[[input$numvar]])
+                         if (length(x) > 5000) {
+                           warning("Shapiro-Wilk puede no ser preciso para muestras grandes (n > 5000)")
+                         }
+                         list(analysis = shapiro.test(x))
+                       },
+                       "ks" = {
+                         x <- na.omit(df[[input$numvar]])
+                         list(analysis = ks.test(x, "pnorm", mean(x), sd(x)))
+                       },
+                       "lillie" = {
+                         x <- na.omit(df[[input$numvar]])
+                         list(analysis = lillie.test(x))
+                       },
+                       "jb" = {
+                         x <- na.omit(df[[input$numvar]])
+                         list(analysis = jarque.bera.test(x))
+                       }
+      )
+      
+      # Añadir metadatos al resultado
+      result$test_name <- test_name
+      result$vars_used <- vars_used
+      result$timestamp <- Sys.time()
+      
+      return(result)
+      
+    }, error = function(e) {
+      return(list(
+        error = TRUE,
+        message = e$message,
+        test_name = test_name,
+        vars_used = vars_used
+      ))
+    })
+  })
+  
+  # Renderizar resultados
+  output$result <- renderPrint({
+    req(results())
+    
+    res <- results()
+    
+    # Si hay error, mostrarlo
+    if (!is.null(res$error) && res$error) {
+      cat("ERROR EN EL ANÁLISIS:\n")
+      cat(res$message, "\n\n")
+      cat("Prueba:", res$test_name, "\n")
+      cat("Variables utilizadas:", paste(res$vars_used, collapse = ", "), "\n")
+      return()
+    }
+    
+    # Mostrar información del análisis
+    cat("PRUEBA:", res$test_name, "\n")
+    cat("Fecha y hora:", format(res$timestamp, "%d/%m/%Y %H:%M:%S"), "\n")
+    cat("Variables utilizadas:", paste(res$vars_used, collapse = ", "), "\n\n")
+    
+    # Mostrar resultados específicos según la prueba
+    if (input$test == "chi2" || input$test == "mcnemar") {
+      cat("Tabla de contingencia:\n")
+      print(res$contingency_table)
+      cat("\nResultados del test:\n")
+      print(res$analysis)
+    } else if (input$test == "anova") {
+      cat("Resultados ANOVA:\n")
+      print(res$analysis)
+      cat("\nComparaciones múltiples (Tukey HSD):\n")
+      print(res$tukey)
+    } else {
+      print(res$analysis)
+    }
+    
+    # Añadir interpretación para tests de normalidad
+    if (input$test %in% c("shapiro", "ks", "lillie", "jb")) {
+      cat("\nInterpretación:\n")
+      p_valor <- res$analysis$p.value
+      cat("p-valor =", p_valor, "\n")
+      if (p_valor < 0.05) {
+        cat("Como p < 0.05, se rechaza la hipótesis nula.\n")
+        cat("Conclusión: Los datos NO siguen una distribución normal.\n")
+      } else {
+        cat("Como p >= 0.05, no se rechaza la hipótesis nula.\n")
+        cat("Conclusión: No hay evidencia suficiente para afirmar que los datos no siguen una distribución normal.\n")
+      }
+    }
+  })
+  
+  # Gráficos
+  output$plot1 <- renderPlot({
+    req(results(), dataset())
+    
+    df <- dataset()
+    test <- input$test
+    
+    if (test %in% c("shapiro", "ks", "lillie", "jb")) {
+      # QQ plot para tests de normalidad
+      x <- na.omit(df[[input$numvar]])
+      ggplot(data.frame(x), aes(sample = x)) +
+        stat_qq() +
+        stat_qq_line() +
+        labs(title = "Gráfico Q-Q Normal",
+             subtitle = paste("Variable:", input$numvar),
+             x = "Cuantiles teóricos",
+             y = "Cuantiles observados") +
+        theme_minimal()
+    } else if (test %in% c("t", "anova", "wilcox")) {
+      # Boxplot para comparaciones de grupos
+      ggplot(df, aes_string(x = input$group, y = input$value, fill = input$group)) +
+        geom_boxplot() +
+        labs(title = "Diagrama de cajas y bigotes",
+             subtitle = paste("Variable:", input$value, "por", input$group),
+             x = input$group,
+             y = input$value) +
+        theme_minimal() +
+        theme(legend.position = "none")
+    } else if (test %in% c("pearson", "spearman")) {
+      # Gráfico de dispersión para correlaciones
+      ggplot(df, aes_string(x = input$xvar, y = input$yvar)) +
+        geom_point() +
+        geom_smooth(method = "lm", se = TRUE, color = "blue") +
+        labs(title = "Diagrama de dispersión",
+             subtitle = paste("Correlación entre", input$xvar, "y", input$yvar),
+             x = input$xvar,
+             y = input$yvar) +
+        theme_minimal()
+    } else if (test %in% c("chi2", "mcnemar")) {
+      # Mosaicplot para tablas de contingencia
+      res <- results()
+      if (!is.null(res$contingency_table)) {
+        par(mar = c(5, 5, 4, 2))
+        mosaicplot(res$contingency_table, 
+                   main = "Diagrama de mosaico",
+                   sub = paste("Variables:", input$var1, "y", input$var2),
+                   color = TRUE,
+                   shade = FALSE)
+      }
+    }
+  })
+  
+  output$plot2 <- renderPlot({
+    req(results(), dataset())
+    
+    df <- dataset()
+    test <- input$test
+    
+    if (test %in% c("shapiro", "ks", "lillie", "jb")) {
+      # Histograma para tests de normalidad
+      x <- na.omit(df[[input$numvar]])
+      ggplot(data.frame(x), aes(x = x)) +
+        geom_histogram(aes(y = ..density..), bins = 30, 
+                       fill = "steelblue", color = "black", alpha = 0.7) +
+        geom_density(color = "red", size = 1) +
+        stat_function(fun = dnorm, 
+                      args = list(mean = mean(x), sd = sd(x)),
+                      color = "darkgreen", size = 1, linetype = "dashed") +
+        labs(title = "Histograma con curva de densidad",
+             subtitle = paste("Variable:", input$numvar),
+             x = input$numvar,
+             y = "Densidad") +
+        theme_minimal()
+    } else if (test == "anova") {
+      # Gráfico de residuos para ANOVA
+      model <- aov(df[[input$value]] ~ df[[input$group]])
+      
+      # Crear dataframe con residuos
+      res_df <- data.frame(
+        residuals = residuals(model),
+        fitted = fitted(model)
+      )
+      
+      ggplot(res_df, aes(x = fitted, y = residuals)) +
+        geom_point() +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+        labs(title = "Gráfico de residuos para ANOVA",
+             subtitle = "Verificación de homocedasticidad",
+             x = "Valores ajustados",
+             y = "Residuos") +
+        theme_minimal()
+    } else if (test %in% c("t", "wilcox")) {
+      # Gráfico de densidad para comparación de grupos
+      ggplot(df, aes_string(x = input$value, fill = input$group)) +
+        geom_density(alpha = 0.5) +
+        labs(title = "Distribución por grupos",
+             subtitle = paste("Variable:", input$value, "por", input$group),
+             x = input$value,
+             y = "Densidad") +
+        theme_minimal()
+    }
+  })
+  
+  # Descargar resultados
+  output$download_result <- downloadHandler(
+    filename = function() {
+      paste("analisis-", format(Sys.time(), "%Y%m%d-%H%M%S"), ".txt", sep = "")
+    },
+    content = function(file) {
+      sink(file)
+      
+      res <- results()
+      
+      cat("ANÁLISIS ESTADÍSTICO\n")
+      cat("====================\n\n")
+      cat("Fecha y hora: ", format(Sys.time(), "%d/%m/%Y %H:%M:%S"), "\n")
+      cat("Prueba realizada: ", res$test_name, "\n")
+      cat("Variables utilizadas: ", paste(res$vars_used, collapse = ", "), "\n\n")
+      
+      if (!is.null(res$error) && res$error) {
+        cat("ERROR EN EL ANÁLISIS:\n")
+        cat(res$message, "\n\n")
+      } else {
+        # Mostrar resultados según la prueba
+        if (input$test == "chi2" || input$test == "mcnemar") {
+          cat("Tabla de contingencia:\n")
+          print(res$contingency_table)
+          cat("\nResultados del test:\n")
+          print(res$analysis)
+        } else if (input$test == "anova") {
+          cat("Resultados ANOVA:\n")
+          print(res$analysis)
+          cat("\nComparaciones múltiples (Tukey HSD):\n")
+          print(res$tukey)
+        } else {
+          print(res$analysis)
+        }
+        
+        # Añadir interpretación para tests de normalidad
+        if (input$test %in% c("shapiro", "ks", "lillie", "jb")) {
+          cat("\nInterpretación:\n")
+          p_valor <- res$analysis$p.value
+          cat("p-valor =", p_valor, "\n")
+          if (p_valor < 0.05) {
+            cat("Como p < 0.05, se rechaza la hipótesis nula.\n")
+            cat("Conclusión: Los datos NO siguen una distribución normal.\n")
+          } else {
+            cat("Como p >= 0.05, no se rechaza la hipótesis nula.\n")
+            cat("Conclusión: No hay evidencia suficiente para afirmar que los datos no siguen una distribución normal.\n")
+          }
+        }
+      }
+      
+      sink()
+    }
+  )
+}
+
+shinyApp(ui, server)
