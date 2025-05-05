@@ -1,0 +1,56 @@
+# Librerías útiles
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+
+# Función Generador Congruencial Lineal (LCG)
+generador_lcg <- function(seed = 14563, n = 1000) {
+  a <- 1683515270  # multiplicador
+  c <- 14563       # incremento
+  m <- 2^31        # módulo
+
+  estado <- as.numeric(seed)
+  salida <- numeric(n)
+
+  for (i in 1:n) {
+    estado <- (a * estado + c) %% m
+    salida[i] <- estado / m
+  }
+
+  return(salida)
+}
+
+# Comparación con runif()
+set.seed(42)
+valores_r <- runif(1000)
+valores_lcg <- generador_lcg(seed = 42, n = 1000)
+
+# Convertir a data frame para usar ggplot2
+df <- data.frame(
+  valor = c(valores_r, valores_lcg),
+  tipo = rep(c("R_nativo", "LCG"), each = 1000)
+)
+
+# Histogramas lado a lado
+p1 <- ggplot(filter(df, tipo == "R_nativo"), aes(x = valor)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "white") +
+  labs(title = "Distribución - runif()", x = "Valor", y = "Frecuencia") +
+  theme_minimal()
+
+p2 <- ggplot(filter(df, tipo == "LCG"), aes(x = valor)) +
+  geom_histogram(bins = 30, fill = "lightgreen", color = "white") +
+  labs(title = "Distribución - LCG", x = "Valor", y = "Frecuencia") +
+  theme_minimal()
+
+# Mostrar gráficos
+grid.arrange(p1, p2, ncol = 2)
+
+# Estadísticas básicas
+cat("Estadísticas para runif():\n")
+cat("  Media:", mean(valores_r), "\n")
+cat("  Varianza:", var(valores_r), "\n\n")
+
+cat("Estadísticas para LCG:\n")
+cat("  Media:", mean(valores_lcg), "\n")
+cat("  Varianza:", var(valores_lcg), "\n")
